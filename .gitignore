@@ -1,0 +1,6 @@
+# Esconder as senhas e tokens
+dados_bot.py
+
+# Esconder arquivos temporários do Python
+__pycache__/
+*.pyc
