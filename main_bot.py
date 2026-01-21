@@ -9,101 +9,84 @@ import pandas_ta as ta
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 bot = telebot.TeleBot(TOKEN)
-exchange = ccxt.mexc()
 
-# Configuração do Stop Móvel (Ex: 2% de queda a partir do topo)
-PERCENTUAL_STOP_MOVEL = 0.02 
+# Inicializando as duas corretoras
+exchanges = {
+    'MEXC': ccxt.mexc(),
+    'BINANCE': ccxt.binance()
+}
+
 SYMBOLS = ['SUI/USDT', 'RENDER/USDT', 'JASMY/USDT', 'DUSK/USDT', 'SOL/USDT']
 TIMEFRAME = '15m'
+PERCENTUAL_STOP_MOVEL = 0.02
+posicoes_abertas = {}
 
-# Dicionário para "lembrar" as moedas compradas e o maior preço atingido
-posicoes_abertas = {} # Estrutura: {'SUI/USDT': {'maior_preco': 1.50}}
-
-def buscar_dados(symbol):
+def buscar_dados(exchange_obj, symbol):
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=250)
+        # A Binance usa símbolos sem a barra em alguns casos, o ccxt trata isso
+        ohlcv = exchange_obj.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=200)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
-        # Indicadores Profissionais
-        df['ema_9'] = ta.ema(df['close'], length=9)
-        df['ema_21'] = ta.ema(df['close'], length=21)
+        # Indicadores
         df['ema_200'] = ta.ema(df['close'], length=200)
         df['rsi'] = ta.rsi(df['close'], length=14)
-        adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
-        df = pd.concat([df, adx_df], axis=1)
+        adx = ta.adx(df['high'], df['low'], df['close'], length=14)
+        df = pd.concat([df, adx], axis=1)
         df['vol_avg'] = ta.sma(df['volume'], length=20)
         
         return df
     except Exception as e:
-        print(f"Erro ao buscar dados de {symbol}: {e}")
         return None
 
-def monitorar_mercado():
-    print(f"Verificando oportunidades... {time.strftime('%H:%M:%S')}")
+def monitorar():
+    print(f"📡 Varrendo MEXC e Binance... {time.strftime('%H:%M:%S')}")
     
     for symbol in SYMBOLS:
-        df = buscar_dados(symbol)
-        if df is None: continue
+        for ex_name, ex_obj in exchanges.items():
+            df = buscar_dados(ex_obj, symbol)
+            if df is None or df.empty: continue
 
-        atual = df.iloc[-1]
-        anterior = df.iloc[-2]
-        
-        preco_atual = atual['close']
-        abertura = atual['open']
-        volume_atual = atual['volume']
-        vol_medio = atual['vol_avg']
-        rsi = atual['rsi']
-        ema_200 = atual['ema_200']
-        adx = atual['ADX_14']
+            atual = df.iloc[-1]
+            # Verificando se os indicadores foram calculados (evita erros de dados insuficientes)
+            if 'ADX_14' not in atual: continue
 
-        # --- LÓGICA DE ENTRADA (PRO) ---
-        # Filtros: Volume > 2.5x, Acima da EMA 200, ADX forte (>25), Candle Verde Limpo
-        condicao_compra = (
-            (volume_atual > vol_medio * 2.5) and 
-            (preco_atual > ema_200) and 
-            (adx > 25) and 
-            (preco_atual > abertura) and # Candle Verde
-            (symbol not in posicoes_abertas) # Só entra se não estiver nela
-        )
-
-        if condicao_compra:
-            posicoes_abertas[symbol] = {'maior_preco': preco_atual}
-            msg = (f"💎 **ENTRADA PROFISSIONAL: {symbol}**\n\n"
-                   f"💰 Preço: ${preco_atual}\n"
-                   f"🔥 Volume: {volume_atual/vol_medio:.1f}x acima da média\n"
-                   f"📈 ADX (Força): {adx:.1f}\n"
-                   f"🛡️ Stop Móvel Ativado: {PERCENTUAL_STOP_MOVEL*100}%")
-            bot.send_message(CHAT_ID, msg, parse_mode='Markdown')
-
-        # --- LÓGICA DE TRAILING STOP (SAÍDA) ---
-        if symbol in posicoes_abertas:
-            # Atualiza o maior preço se a moeda subiu
-            if preco_atual > posicoes_abertas[symbol]['maior_preco']:
-                posicoes_abertas[symbol]['maior_preco'] = preco_atual
+            preco = atual['close']
+            vol_ratio = atual['volume'] / atual['vol_avg']
             
-            maior_preco_atingido = posicoes_abertas[symbol]['maior_preco']
-            preco_stop = maior_preco_atingido * (1 - PERCENTUAL_STOP_MOVEL)
+            # --- LÓGICA DE ENTRADA MULTI-EXCHANGE ---
+            if (vol_ratio > 2.5) and (preco > atual['ema_200']) and (atual['ADX_14'] > 25) and (preco > atual['open']):
+                if f"{symbol}_{ex_name}" not in posicoes_abertas:
+                    posicoes_abertas[f"{symbol}_{ex_name}"] = {'maior_preco': preco}
+                    
+                    msg = (f"🔥 **ALERTA DE VOLUME: {symbol}**\n"
+                           f"🏛️ Corretora: **{ex_name}**\n\n"
+                           f"💰 Preço: ${preco:.4f}\n"
+                           f"📊 Volume: {vol_ratio:.1f}x acima da média\n"
+                           f"📈 ADX: {atual['ADX_14']:.1f}\n"
+                           f"✅ Sinal detectado primeiro na {ex_name}!")
+                    bot.send_message(CHAT_ID, msg, parse_mode='Markdown')
 
-            # Se o preço cair abaixo do Stop Móvel ou RSI esticar demais
-            if preco_atual <= preco_stop or rsi > 80:
-                lucro_estimado = ((preco_atual / preco_stop) - 1) * 100 # Simbólico
-                motivo = "Stop Móvel Atingido 🛡️" if preco_atual <= preco_stop else "RSI Sobrecomprado ⚠️"
+            # --- LÓGICA DE TRAILING STOP ---
+            pos_key = f"{symbol}_{ex_name}"
+            if pos_key in posicoes_abertas:
+                if preco > posicoes_abertas[pos_key]['maior_preco']:
+                    posicoes_abertas[pos_key]['maior_preco'] = preco
                 
-                msg = (f"🏁 **SAÍDA ESTRATÉGICA: {symbol}**\n\n"
-                       f"💰 Preço de Saída: ${preco_atual}\n"
-                       f"📢 Motivo: {motivo}\n"
-                       f"💵 Coloque o lucro no bolso!")
+                preco_stop = posicoes_abertas[pos_key]['maior_preco'] * (1 - PERCENTUAL_STOP_MOVEL)
                 
-                bot.send_message(CHAT_ID, msg, parse_mode='Markdown')
-                del posicoes_abertas[symbol] # Remove da memória para poder entrar de novo
+                if preco <= preco_stop or atual['rsi'] > 80:
+                    msg = (f"🏁 **SAÍDA ESTRATÉGICA ({ex_name}): {symbol}**\n"
+                           f"💰 Preço: ${preco:.4f}\n"
+                           f"📢 Motivo: Trailing Stop ou RSI Alto\n"
+                           f"💵 Proteja seu lucro!")
+                    bot.send_message(CHAT_ID, msg, parse_mode='Markdown')
+                    del posicoes_abertas[pos_key]
 
-# --- LOOP ---
 if __name__ == "__main__":
-    bot.send_message(CHAT_ID, "🚀 **Dindo Pro v7.0 Online**\nMonitorando Altas Reais com Stop Móvel.")
+    bot.send_message(CHAT_ID, "🤖 **Dindo v8.0 Multi-Exchange Online!**\nMonitorando MEXC + Binance 24h.")
     while True:
         try:
-            monitorar_mercado()
-            time.sleep(60)
+            monitorar()
+            time.sleep(30) # Verifica a cada 30 segundos (mais rápido!)
         except Exception as e:
-            print(f"Erro: {e}")
             time.sleep(10)
