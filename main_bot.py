@@ -6,25 +6,25 @@ import pandas as pd
 import pandas_ta as ta
 import threading
 
-# --- CONFIGURAÇÕES DE AMBIENTE ---
+# --- CONFIGURAÇÕES ---
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 bot = telebot.TeleBot(TOKEN)
 
-# Inicialização das Exchanges
+# Inicializamos as corretoras com carregamento automático de mercados
 exchanges = {
     'MEXC': ccxt.mexc({'enableRateLimit': True}),
     'BINANCE': ccxt.binance({'enableRateLimit': True})
 }
 
-# Lista Completa (Tecnologia + Memecoins)
+# Lista de 29 moedas (Já com POL no lugar de MATIC)
 SYMBOLS = [
     'SUI/USDT', 'RENDER/USDT', 'JASMY/USDT', 'DUSK/USDT', 'SOL/USDT',
     'FET/USDT', 'NEAR/USDT', 'TIA/USDT', 'PYTH/USDT', 'LINK/USDT',
     'ARB/USDT', 'OP/USDT', 'APT/USDT', 'ONDO/USDT', 'TAO/USDT',
     'STX/USDT', 'INJ/USDT', 'SEI/USDT', 'DOT/USDT', 'POL/USDT', 
     'DOGE/USDT', 'SHIB/USDT', 'PEPE/USDT', 'WIF/USDT', 
-    'BONK/USDT', 'FLOKI/USDT', 'POPCAT/USDT', 'BRETT/USDT', 'BOME/USDT'
+    'BONK/USDT', 'FLOKI/USDT', 'POPCAT/USDT', 'BRETT/USDT', 'BOME/USDT', 'BTC/USDT'
 ]
 
 def buscar_dados(exchange_obj, symbol):
@@ -37,13 +37,13 @@ def buscar_dados(exchange_obj, symbol):
     except:
         return None
 
-# --- COMANDO /PRECO CORRIGIDO ---
+# --- COMANDO /PRECO ROBUSTO ---
 @bot.message_handler(commands=['preco'])
 def responder_preco(message):
     try:
         partes = message.text.split()
         if len(partes) < 2:
-            bot.reply_to(message, "💡 Use: `/preco SOL` ou `/preco PEPE`")
+            bot.reply_to(message, "💡 Use: `/preco SOL`")
             return
 
         coin = partes[1].upper().strip()
@@ -54,8 +54,10 @@ def responder_preco(message):
         
         for name, ex in exchanges.items():
             try:
-                # Carrega os mercados para garantir que moedas novas (PEPE/DUSK) sejam achadas
-                ex.load_markets() 
+                # Carregamento preventivo se o mercado ainda não estiver na memória
+                if symbol not in ex.symbols:
+                    ex.load_markets()
+                
                 ticker = ex.fetch_ticker(symbol)
                 preco = ticker['last']
                 variacao = ticker['percentage']
@@ -69,39 +71,35 @@ def responder_preco(message):
 
 # --- LOOP DE MONITORAMENTO ---
 def loop_monitoramento():
-    print("🚀 Monitoramento Profissional Iniciado...")
+    print("🚀 Monitoramento Ativo...")
     while True:
         try:
             for symbol in SYMBOLS:
-                dados_ex = {}
                 for name, ex in exchanges.items():
                     df = buscar_dados(ex, symbol)
                     if df is not None:
-                        dados_ex[name] = df.iloc[-1]
-                
-                # Lógica de Alerta (Volume > 2.5x na MEXC)
-                if 'MEXC' in dados_ex:
-                    mexc = dados_ex['MEXC']
-                    ratio = mexc['volume'] / mexc['vol_avg']
-                    
-                    if ratio > 2.5 and mexc['close'] > mexc['open']:
-                        msg = (f"🚀 **PICO DE VOLUME!**\n\n"
-                               f"💎 Moeda: {symbol}\n"
-                               f"🏛️ Exchange: MEXC\n"
-                               f"📊 Volume: {ratio:.1f}x acima da média\n"
-                               f"💰 Preço: ${mexc['close']:.4f}")
-                        bot.send_message(CHAT_ID, msg, parse_mode='Markdown')
-            
-            time.sleep(60) # Verifica a cada 1 minuto
+                        atual = df.iloc[-1]
+                        ratio = atual['volume'] / atual['vol_avg']
+                        
+                        if ratio > 2.5 and atual['close'] > atual['open']:
+                            msg = (f"🚀 **PICO DE VOLUME!**\n\n"
+                                   f"💎 Moeda: {symbol}\n"
+                                   f"🏛️ Exchange: {name}\n"
+                                   f"📊 Volume: {ratio:.1f}x acima da média\n"
+                                   f"💰 Preço: ${atual['close']:.4f}")
+                            bot.send_message(CHAT_ID, msg, parse_mode='Markdown')
+            time.sleep(60)
         except Exception as e:
-            print(f"Erro no loop: {e}")
             time.sleep(10)
 
 if __name__ == "__main__":
-    print("✅ Sistema Online. Verifique o Telegram.")
-    # Thread para o monitoramento não travar os comandos do Telegram
+    print("✅ Robô Dindo v11.1 Online.")
+    # Forçamos o carregamento inicial dos mercados para não dar erro de "não encontrada"
+    for ex in exchanges.values():
+        try: ex.load_markets()
+        except: pass
+
     t = threading.Thread(target=loop_monitoramento)
     t.daemon = True
     t.start()
-    
     bot.infinity_polling()
