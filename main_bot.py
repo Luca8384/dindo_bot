@@ -43,6 +43,7 @@ def responder_preco(message):
     if '/' not in coin: coin = f"{coin}/USDT"
     bot.reply_to(message, f"Buscando preço de {coin}...")
 
+# Linha de seguranca para forcar o push v10.4
 def loop_monitoramento():
     print("🚀 Monitoramento Automático Iniciado...")
     while True:
