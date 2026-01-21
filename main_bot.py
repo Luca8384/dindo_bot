@@ -4,13 +4,13 @@ import ccxt
 import telebot
 import pandas as pd
 import pandas_ta as ta
+import threading
 
 # --- CONFIGURAÇÕES ---
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 bot = telebot.TeleBot(TOKEN)
 
-# Inicializando as duas corretoras
 exchanges = {
     'MEXC': ccxt.mexc(),
     'BINANCE': ccxt.binance()
@@ -21,72 +21,72 @@ TIMEFRAME = '15m'
 PERCENTUAL_STOP_MOVEL = 0.02
 posicoes_abertas = {}
 
+# --- FUNÇÃO DE DADOS ---
 def buscar_dados(exchange_obj, symbol):
     try:
-        # A Binance usa símbolos sem a barra em alguns casos, o ccxt trata isso
-        ohlcv = exchange_obj.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=200)
+        ohlcv = exchange_obj.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=150)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        
-        # Indicadores
         df['ema_200'] = ta.ema(df['close'], length=200)
         df['rsi'] = ta.rsi(df['close'], length=14)
-        adx = ta.adx(df['high'], df['low'], df['close'], length=14)
-        df = pd.concat([df, adx], axis=1)
         df['vol_avg'] = ta.sma(df['volume'], length=20)
-        
         return df
-    except Exception as e:
+    except:
         return None
 
-def monitorar():
-    print(f"📡 Varrendo MEXC e Binance... {time.strftime('%H:%M:%S')}")
+# --- COMANDO INTERATIVO: /preco ---
+@bot.message_handler(commands=['preco'])
+def responder_preco(message):
+    texto = message.text.split()
+    if len(texto) < 2:
+        bot.reply_to(message, "❌ Use: `/preco MOEDA` (Ex: /preco SUI)", parse_mode='Markdown')
+        return
+
+    coin = texto[1].upper()
+    if '/' not in coin:
+        coin = f"{coin}/USDT"
+
+    resposta = f"🔍 **Consulta de Preço: {coin}**\n\n"
+    for name, ex in exchanges.items():
+        try:
+            ticker = ex.fetch_ticker(coin)
+            preco = ticker['last']
+            variacao = ticker['percentage']
+            resposta += f"🏛️ **{name}**: ${preco:.4f} ({variacao:+.2f}%)\n"
+        except:
+            resposta += f"🏛️ **{name}**: Moeda não encontrada.\n"
     
-    for symbol in SYMBOLS:
-        for ex_name, ex_obj in exchanges.items():
-            df = buscar_dados(ex_obj, symbol)
-            if df is None or df.empty: continue
+    bot.send_message(message.chat.id, resposta, parse_mode='Markdown')
 
-            atual = df.iloc[-1]
-            # Verificando se os indicadores foram calculados (evita erros de dados insuficientes)
-            if 'ADX_14' not in atual: continue
-
-            preco = atual['close']
-            vol_ratio = atual['volume'] / atual['vol_avg']
-            
-            # --- LÓGICA DE ENTRADA MULTI-EXCHANGE ---
-            if (vol_ratio > 2.5) and (preco > atual['ema_200']) and (atual['ADX_14'] > 25) and (preco > atual['open']):
-                if f"{symbol}_{ex_name}" not in posicoes_abertas:
-                    posicoes_abertas[f"{symbol}_{ex_name}"] = {'maior_preco': preco}
-                    
-                    msg = (f"🔥 **ALERTA DE VOLUME: {symbol}**\n"
-                           f"🏛️ Corretora: **{ex_name}**\n\n"
-                           f"💰 Preço: ${preco:.4f}\n"
-                           f"📊 Volume: {vol_ratio:.1f}x acima da média\n"
-                           f"📈 ADX: {atual['ADX_14']:.1f}\n"
-                           f"✅ Sinal detectado primeiro na {ex_name}!")
-                    bot.send_message(CHAT_ID, msg, parse_mode='Markdown')
-
-            # --- LÓGICA DE TRAILING STOP ---
-            pos_key = f"{symbol}_{ex_name}"
-            if pos_key in posicoes_abertas:
-                if preco > posicoes_abertas[pos_key]['maior_preco']:
-                    posicoes_abertas[pos_key]['maior_preco'] = preco
-                
-                preco_stop = posicoes_abertas[pos_key]['maior_preco'] * (1 - PERCENTUAL_STOP_MOVEL)
-                
-                if preco <= preco_stop or atual['rsi'] > 80:
-                    msg = (f"🏁 **SAÍDA ESTRATÉGICA ({ex_name}): {symbol}**\n"
-                           f"💰 Preço: ${preco:.4f}\n"
-                           f"📢 Motivo: Trailing Stop ou RSI Alto\n"
-                           f"💵 Proteja seu lucro!")
-                    bot.send_message(CHAT_ID, msg, parse_mode='Markdown')
-                    del posicoes_abertas[pos_key]
-
-if __name__ == "__main__":
-    bot.send_message(CHAT_ID, "🤖 **Dindo v8.0 Multi-Exchange Online!**\nMonitorando MEXC + Binance 24h.")
+# --- MONITORAMENTO AUTOMÁTICO ---
+def loop_monitoramento():
     while True:
         try:
-            monitorar()
-            time.sleep(30) # Verifica a cada 30 segundos (mais rápido!)
+            for symbol in SYMBOLS:
+                for ex_name, ex_obj in exchanges.items():
+                    df = buscar_dados(ex_obj, symbol)
+                    if df is None or df.empty: continue
+                    
+                    atual = df.iloc[-1]
+                    preco = atual['close']
+                    vol_ratio = atual['volume'] / atual['vol_avg']
+
+                    # Entrada: Volume 2.5x + Preço > EMA 200 + Candle Verde
+                    if (vol_ratio > 2.5) and (preco > atual['ema_200']) and (preco > atual['open']):
+                        pos_key = f"{symbol}_{ex_name}"
+                        if pos_key not in posicoes_abertas:
+                            posicoes_abertas[pos_key] = {'maior_preco': preco}
+                            bot.send_message(CHAT_ID, f"🚀 **ALERTA DE ALTA ({ex_name})**\n💎 {symbol}\n💰 Preço: ${preco:.4f}\n🔥 Volume: {vol_ratio:.1f}x", parse_mode='Markdown')
+
+            time.sleep(40) # Evita bloqueio de API
         except Exception as e:
             time.sleep(10)
+
+# --- INICIALIZAÇÃO ---
+if __name__ == "__main__":
+    print("🤖 Robô Iniciado...")
+    # Rodar o monitoramento em uma "linha" separada (Thread) para não travar o Telegram
+    t = threading.Thread(target=loop_monitoramento)
+    t.start()
+    
+    # Rodar o bot do Telegram para ouvir comandos
+    bot.infinity_polling()
