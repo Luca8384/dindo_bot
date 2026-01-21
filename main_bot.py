@@ -74,3 +74,4 @@ if __name__ == "__main__":
     t.start()
     
     bot.infinity_polling()
+    # Versao Final 10.6 - Limpeza de Sintaxe
