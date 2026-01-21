@@ -16,14 +16,15 @@ exchanges = {
     'BINANCE': ccxt.binance()
 }
 
+# Sua lista completa de 29 moedas
 SYMBOLS = [
     'SUI/USDT', 'RENDER/USDT', 'JASMY/USDT', 'DUSK/USDT', 'SOL/USDT',
     'FET/USDT', 'NEAR/USDT', 'TIA/USDT', 'PYTH/USDT', 'LINK/USDT',
     'ARB/USDT', 'OP/USDT', 'APT/USDT', 'ONDO/USDT', 'TAO/USDT',
-    'STX/USDT', 'INJ/USDT', 'SEI/USDT', 'DOT/USDT', 'MATIC/USDT', 'DOGE/USDT', 'SHIB/USDT', 'PEPE/USDT', 'WIF/USDT', 
+    'STX/USDT', 'INJ/USDT', 'SEI/USDT', 'DOT/USDT', 'MATIC/USDT', 
+    'DOGE/USDT', 'SHIB/USDT', 'PEPE/USDT', 'WIF/USDT', 
     'BONK/USDT', 'FLOKI/USDT', 'POPCAT/USDT', 'BRETT/USDT', 'BOME/USDT'
 ]
-    
 
 def buscar_dados(exchange_obj, symbol):
     try:
@@ -33,45 +34,68 @@ def buscar_dados(exchange_obj, symbol):
         df['vol_avg'] = ta.sma(df['volume'], length=20)
         return df
     except Exception as e:
-        print(f"Erro ao buscar {symbol} na {exchange_obj.id}: {e}")
         return None
 
+# --- COMANDO /PRECO (AGORA COM BUSCA REAL) ---
 @bot.message_handler(commands=['preco'])
 def responder_preco(message):
-    print(f"Recebi comando /preco de {message.chat.id}")
-    coin = message.text.split()[1].upper() if len(message.text.split()) > 1 else "SUI"
-    if '/' not in coin: coin = f"{coin}/USDT"
-    bot.reply_to(message, f"Buscando preço de {coin}...")
+    try:
+        texto = message.text.split()
+        coin = texto[1].upper() if len(texto) > 1 else "SUI"
+        if '/' not in coin: coin = f"{coin}/USDT"
+        
+        # Mensagem temporária
+        msg_aguarde = bot.reply_to(message, f"🔍 Consultando {coin} nas exchanges...")
+        
+        resposta = f"📊 **Cotações em Tempo Real: {coin}**\n\n"
+        encontrou = False
+        
+        for name, ex in exchanges.items():
+            try:
+                ticker = ex.fetch_ticker(coin)
+                preco = ticker['last']
+                variacao = ticker['percentage']
+                resposta += f"🏛️ **{name}**: `${preco:.4f}` ({variacao:+.2f}%)\n"
+                encontrou = True
+            except:
+                resposta += f"🏛️ **{name}**: Moeda não listada.\n"
+        
+        if not encontrou:
+            bot.edit_message_text(f"❌ A moeda **{coin}** não foi encontrada.", message.chat.id, msg_aguarde.message_id)
+        else:
+            bot.edit_message_text(resposta, message.chat.id, msg_aguarde.message_id, parse_mode='Markdown')
+            
+    except Exception as e:
+        print(f"Erro no comando preco: {e}")
 
-# Linha de seguranca para forcar o push v10.4
 def loop_monitoramento():
-    print("🚀 Monitoramento Automático Iniciado...")
+    print("🚀 Monitoramento de Volume Iniciado...")
     while True:
         try:
             for symbol in SYMBOLS:
-                # Diminuí o filtro para 1.5x apenas para testar se ele envia algo!
                 for ex_name, ex_obj in exchanges.items():
                     df = buscar_dados(ex_obj, symbol)
                     if df is not None:
                         atual = df.iloc[-1]
                         vol_ratio = atual['volume'] / atual['vol_avg']
-                        print(f"Check {symbol} em {ex_name}: Vol {vol_ratio:.2f}x") # Veremos isso no Log!
                         
-                        if vol_ratio > 1.5 and atual['close'] > atual['open']:
-                             bot.send_message(CHAT_ID, f"📢 Sinal de Teste: {symbol} na {ex_name} com {vol_ratio:.1f}x volume")
+                        # Filtro Profissional: Volume > 2.5x e Candle Verde
+                        if vol_ratio > 2.5 and atual['close'] > atual['open']:
+                             msg = (f"🚀 **PICO DE VOLUME DETECTADO!**\n\n"
+                                    f"💎 Moeda: {symbol}\n"
+                                    f"🏛️ Exchange: {ex_name}\n"
+                                    f"📊 Volume: {vol_ratio:.1f}x acima da média\n"
+                                    f"💰 Preço: ${atual['close']:.4f}")
+                             bot.send_message(CHAT_ID, msg, parse_mode='Markdown')
 
             time.sleep(60)
         except Exception as e:
-            print(f"Erro no Loop: {e}")
             time.sleep(10)
 
 if __name__ == "__main__":
-    print("✅ Sistema Online. Verifique o Telegram.")
-    bot.send_message(CHAT_ID, "🤖 Robô Dindo v10.1 Online e Monitorando!")
-    
+    print("✅ Robô Dindo em execução.")
     t = threading.Thread(target=loop_monitoramento)
-    t.setDaemon(True) # Garante que a thread morra se o programa parar
+    t.daemon = True
     t.start()
-    
     bot.infinity_polling()
-    # Versao Final 10.6 - Limpeza de Sintaxe
+    # Versao Final 10.7 - Logica de Precos Ativada
