@@ -11,11 +11,15 @@ TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 bot = telebot.TeleBot(TOKEN)
 
-# Configuração robusta para as Exchanges
-# 'defaultType': 'spot' força a Binance a olhar apenas para o mercado à vista
+# Conexão Autenticada para evitar bloqueios de IP
 exchanges = {
-    'MEXC': ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
-    'BINANCE': ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
+    'MEXC': ccxt.mexc({'enableRateLimit': True}),
+    'BINANCE': ccxt.binance({
+        'apiKey': os.getenv('BINANCE_API_KEY'),
+        'secret': os.getenv('BINANCE_SECRET'),
+        'enableRateLimit': True,
+        'options': {'defaultType': 'spot'}
+    })
 }
 
 SYMBOLS = [
@@ -27,16 +31,17 @@ SYMBOLS = [
     'BONK/USDT', 'FLOKI/USDT', 'POPCAT/USDT', 'BRETT/USDT', 'BOME/USDT', 'BTC/USDT'
 ]
 
-def buscar_preco_seguro(exchange_obj, symbol):
+def buscar_preco_com_log(exchange_obj, symbol):
     try:
-        # Tenta carregar mercados apenas se estiverem vazios
+        # Força o carregamento para garantir que a Binance "acorde"
         if not exchange_obj.markets:
             exchange_obj.load_markets()
         
         ticker = exchange_obj.fetch_ticker(symbol)
         return ticker['last'], ticker['percentage']
     except Exception as e:
-        print(f"Erro na {exchange_obj.id} para {symbol}: {e}")
+        # Isso aparecerá no Log do Koyeb para sabermos o MOTIVO exato do erro
+        print(f"⚠️ Erro na {exchange_obj.id} ({symbol}): {str(e)[:50]}")
         return None, None
 
 @bot.message_handler(commands=['preco'])
@@ -44,30 +49,29 @@ def responder_preco(message):
     try:
         partes = message.text.split()
         if len(partes) < 2:
-            bot.reply_to(message, "💡 Use: `/preco SOL` ou `/preco PEPE`")
+            bot.reply_to(message, "💡 Use: `/preco SOL`")
             return
 
         coin = partes[1].upper().strip()
         symbol = f"{coin}/USDT"
         
-        msg = bot.reply_to(message, f"🔍 Pesquisando {symbol} no mercado Spot...")
+        msg = bot.reply_to(message, f"🔍 Consultando {symbol} (Modo Autenticado)...")
         
-        linhas_resposta = []
+        linhas = []
         for name, ex in exchanges.items():
-            preco, var = buscar_preco_seguro(ex, symbol)
+            preco, var = buscar_preco_com_log(ex, symbol)
             if preco:
-                linhas_resposta.append(f"🏛️ **{name}**: `${preco:.4f}` ({var:+.2f}%)")
+                linhas.append(f"🏛️ **{name}**: `${preco:.4f}` ({var:+.2f}%)")
             else:
-                linhas_resposta.append(f"🏛️ **{name}**: Sem dados (Spot)")
+                linhas.append(f"🏛️ **{name}**: Erro/Não encontrada")
 
-        texto_final = f"📊 **Cotações: {symbol}**\n\n" + "\n".join(linhas_resposta)
+        texto_final = f"📊 **Cotações: {symbol}**\n\n" + "\n".join(linhas)
         bot.edit_message_text(texto_final, message.chat.id, msg.message_id, parse_mode='Markdown')
-
     except Exception as e:
-        print(f"Erro comando preco: {e}")
+        print(f"Erro comando: {e}")
 
 def loop_monitoramento():
-    print("🚀 Monitoramento de Volume Ativo...")
+    print("🚀 Monitoramento v15.0 Ativo...")
     while True:
         try:
             for symbol in SYMBOLS:
@@ -88,7 +92,6 @@ def loop_monitoramento():
             time.sleep(10)
 
 if __name__ == "__main__":
-    print("✅ Sistema Iniciado v14.0")
     t = threading.Thread(target=loop_monitoramento)
     t.daemon = True
     t.start()
