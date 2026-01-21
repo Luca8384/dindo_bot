@@ -1,113 +1,109 @@
-import ccxt
-import time
-import requests
 import os
-from flask import Flask
-from threading import Thread
-# Importamos as funções que criamos no arquivo indicadores.py
-from indicadores import calcular_rsi, detectar_acumulo, calcular_dados_velas
+import time
+import ccxt
+import telebot
+import pandas as pd
+import pandas_ta as ta
 
-# ==========================================
-# TRUQUE PARA RODAR GRÁTIS NO RENDER (Web Service)
-# ==========================================
-app = Flask('')
+# --- CONFIGURAÇÕES ---
+TOKEN = os.getenv('TELEGRAM_TOKEN')
+CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+bot = telebot.TeleBot(TOKEN)
+exchange = ccxt.mexc()
 
-@app.route('/')
-def home():
-    return "O Dindo Bot está operando!"
+# Configuração do Stop Móvel (Ex: 2% de queda a partir do topo)
+PERCENTUAL_STOP_MOVEL = 0.02 
+SYMBOLS = ['SUI/USDT', 'RENDER/USDT', 'JASMY/USDT', 'DUSK/USDT', 'SOL/USDT']
+TIMEFRAME = '15m'
 
-def run_web_server():
-    # O Render exige que um Web Service escute em uma porta (8080)
-    app.run(host='0.0.0.0', port=8080)
+# Dicionário para "lembrar" as moedas compradas e o maior preço atingido
+posicoes_abertas = {} # Estrutura: {'SUI/USDT': {'maior_preco': 1.50}}
 
-# Iniciamos o servidor web em uma linha separada para não travar o robô
-Thread(target=run_web_server).start()
-# ==========================================
-
-# --- CONFIGURAÇÃO DE ACESSO ---
-try:
-    from dados_bot import TOKEN, CHAT_ID, HOT_LIST
-    print("✅ Configurações locais carregadas.")
-except ImportError:
-    TOKEN = os.getenv('TELEGRAM_TOKEN')
-    CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-    HOT_LIST = ['AIF/USDT', 'RENDER/USDT', 'OORT/USDT', 'ONDO/USDT', 'DUSK/USDT']
-    print("☁️ Configurações de Nuvem (Render) carregadas.")
-
-# --- INICIALIZAÇÃO DA EXCHANGE ---
-exchange = ccxt.mexc({'enableRateLimit': True})
-
-def enviar_telegram(mensagem):
+def buscar_dados(symbol):
     try:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        params = {"chat_id": CHAT_ID, "text": mensagem, "parse_mode": "HTML"}
-        requests.get(url, params=params)
-    except Exception as e:
-        print(f"Erro Telegram: {e}")
-
-def check_logic(symbol):
-    """Análise técnica de cada moeda"""
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, '5m', limit=40)
-        if len(ohlcv) < 30: return
-
-        preco_atual, variacao, ratio_vol, fechamentos = calcular_dados_velas(ohlcv)
-        rsi_atual = calcular_rsi(fechamentos)
-        is_acumulando, var_acumulo, ratio_acumulo = detectar_acumulo(ohlcv)
-
-        link_mexc = f"https://www.mexc.com/exchange/{symbol.replace('/', '_')}"
-
-        # 1. Alerta de Acúmulo
-        if is_acumulando:
-            msg = (f"💎 <b>ACÚMULO (BALEIAS)</b>\n"
-                   f"🪙 Ativo: {symbol}\n"
-                   f"🤫 Lateral: {var_acumulo:.3f}%\n"
-                   f"🐋 Vol: {ratio_acumulo:.2f}x\n"
-                   f"🔗 <a href='{link_mexc}'>Gráfico</a>")
-            enviar_telegram(msg)
-
-        # 2. Alerta de Entrada (Pico de Volume)
-        elif ratio_vol > 5.0 and variacao > 0.4 and rsi_atual < 68:
-            msg = (f"🚀 <b>PICO DE VOLUME</b>\n"
-                   f"🪙 Ativo: {symbol}\n"
-                   f"📈 Alta: +{variacao:.2f}%\n"
-                   f"📊 Força: {ratio_vol:.2f}x\n"
-                   f"🔗 <a href='{link_mexc}'>Gráfico</a>")
-            enviar_telegram(msg)
-
-        # 3. Alerta de Saída (Exaustão)
-        elif rsi_atual > 83:
-            msg = (f"⚠️ <b>SOBRECOMPRA (RSI)</b>\n"
-                   f"🪙 Ativo: {symbol}\n"
-                   f"🚨 RSI em {rsi_atual:.1f}\n"
-                   f"🔗 <a href='{link_mexc}'>Gráfico</a>")
-            enviar_telegram(msg)
-
-    except:
-        pass
-
-# --- LOOP PRINCIPAL ---
-print("🚀 Robô Dindo v5.0 iniciado!")
-enviar_telegram("🤖 <b>Dindo Bot Online!</b>\nMonitorando Top 100 MEXC.")
-
-while True:
-    try:
-        tickers = exchange.fetch_tickers()
-        usdt_symbols = [s for s in tickers if s.endswith('/USDT')]
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=250)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
-        # Filtra as 100 moedas com mais volume nas últimas 24h
-        top_100 = sorted(usdt_symbols, key=lambda x: tickers[x]['quoteVolume'], reverse=True)[:100]
-        lista_final = list(set(top_100 + HOT_LIST))
+        # Indicadores Profissionais
+        df['ema_9'] = ta.ema(df['close'], length=9)
+        df['ema_21'] = ta.ema(df['close'], length=21)
+        df['ema_200'] = ta.ema(df['close'], length=200)
+        df['rsi'] = ta.rsi(df['close'], length=14)
+        adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
+        df = pd.concat([df, adx_df], axis=1)
+        df['vol_avg'] = ta.sma(df['volume'], length=20)
         
-        print(f"🔍 Escaneando {len(lista_final)} ativos...")
-
-        for s in lista_final:
-            check_logic(s)
-            time.sleep(0.1)
-
-        print("✅ Ciclo completo. Aguardando 1 minuto...")
-        time.sleep(60)
-
+        return df
     except Exception as e:
-        print(f"Erro Loop: {e}")
-        time.sleep(15)
+        print(f"Erro ao buscar dados de {symbol}: {e}")
+        return None
+
+def monitorar_mercado():
+    print(f"Verificando oportunidades... {time.strftime('%H:%M:%S')}")
+    
+    for symbol in SYMBOLS:
+        df = buscar_dados(symbol)
+        if df is None: continue
+
+        atual = df.iloc[-1]
+        anterior = df.iloc[-2]
+        
+        preco_atual = atual['close']
+        abertura = atual['open']
+        volume_atual = atual['volume']
+        vol_medio = atual['vol_avg']
+        rsi = atual['rsi']
+        ema_200 = atual['ema_200']
+        adx = atual['ADX_14']
+
+        # --- LÓGICA DE ENTRADA (PRO) ---
+        # Filtros: Volume > 2.5x, Acima da EMA 200, ADX forte (>25), Candle Verde Limpo
+        condicao_compra = (
+            (volume_atual > vol_medio * 2.5) and 
+            (preco_atual > ema_200) and 
+            (adx > 25) and 
+            (preco_atual > abertura) and # Candle Verde
+            (symbol not in posicoes_abertas) # Só entra se não estiver nela
+        )
+
+        if condicao_compra:
+            posicoes_abertas[symbol] = {'maior_preco': preco_atual}
+            msg = (f"💎 **ENTRADA PROFISSIONAL: {symbol}**\n\n"
+                   f"💰 Preço: ${preco_atual}\n"
+                   f"🔥 Volume: {volume_atual/vol_medio:.1f}x acima da média\n"
+                   f"📈 ADX (Força): {adx:.1f}\n"
+                   f"🛡️ Stop Móvel Ativado: {PERCENTUAL_STOP_MOVEL*100}%")
+            bot.send_message(CHAT_ID, msg, parse_mode='Markdown')
+
+        # --- LÓGICA DE TRAILING STOP (SAÍDA) ---
+        if symbol in posicoes_abertas:
+            # Atualiza o maior preço se a moeda subiu
+            if preco_atual > posicoes_abertas[symbol]['maior_preco']:
+                posicoes_abertas[symbol]['maior_preco'] = preco_atual
+            
+            maior_preco_atingido = posicoes_abertas[symbol]['maior_preco']
+            preco_stop = maior_preco_atingido * (1 - PERCENTUAL_STOP_MOVEL)
+
+            # Se o preço cair abaixo do Stop Móvel ou RSI esticar demais
+            if preco_atual <= preco_stop or rsi > 80:
+                lucro_estimado = ((preco_atual / preco_stop) - 1) * 100 # Simbólico
+                motivo = "Stop Móvel Atingido 🛡️" if preco_atual <= preco_stop else "RSI Sobrecomprado ⚠️"
+                
+                msg = (f"🏁 **SAÍDA ESTRATÉGICA: {symbol}**\n\n"
+                       f"💰 Preço de Saída: ${preco_atual}\n"
+                       f"📢 Motivo: {motivo}\n"
+                       f"💵 Coloque o lucro no bolso!")
+                
+                bot.send_message(CHAT_ID, msg, parse_mode='Markdown')
+                del posicoes_abertas[symbol] # Remove da memória para poder entrar de novo
+
+# --- LOOP ---
+if __name__ == "__main__":
+    bot.send_message(CHAT_ID, "🚀 **Dindo Pro v7.0 Online**\nMonitorando Altas Reais com Stop Móvel.")
+    while True:
+        try:
+            monitorar_mercado()
+            time.sleep(60)
+        except Exception as e:
+            print(f"Erro: {e}")
+            time.sleep(10)
